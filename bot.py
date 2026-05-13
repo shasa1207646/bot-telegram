@@ -270,6 +270,16 @@ def _check_secret(req) -> bool:
     return req.headers.get("x-internal-secret") == SECRET
 
 
+def _html_escape(value) -> str:
+    """Escape special HTML characters in user-provided content."""
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 @flask_app.route("/bot/application", methods=["POST"])
 def receive_application():
     if not _check_secret(request):
@@ -291,24 +301,24 @@ def receive_application():
             dt = datetime.fromisoformat(submitted_raw.replace("Z", "+00:00"))
             date_str = dt.strftime("%d.%m.%Y %H:%M")
         except Exception:
-            date_str = submitted_raw
+            date_str = _html_escape(submitted_raw)
     else:
         date_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
     lines = [
-        f"{type_label} *#{app_data['id']}*\n",
-        f"👤 Discord: {app_data.get('username', '—')}",
-        f"🎂 Возраст: {app_data.get('age', '—')} лет",
-        f"📛 Имя: {app_data.get('name', '—')}",
-        f"⏱ Активность: {app_data.get('activity', '—')}",
-        f"🎯 Игры: {app_data.get('games') or '—'}",
+        f"{type_label} <b>#{app_data['id']}</b>\n",
+        f"👤 Discord: {_html_escape(app_data.get('username', '—'))}",
+        f"🎂 Возраст: {_html_escape(app_data.get('age', '—'))} лет",
+        f"📛 Имя: {_html_escape(app_data.get('name', '—'))}",
+        f"⏱ Активность: {_html_escape(app_data.get('activity', '—'))}",
+        f"🎯 Игры: {_html_escape(app_data.get('games') or '—')}",
         f"✅ Правила: {'Принимает' if app_data.get('rules') else 'Не принимает'}",
     ]
 
     app_type = app_data.get("type", "member")
     if app_type in ("curator", "moderator"):
-        lines.append(f"\n📋 Опыт: {app_data.get('experience') or '—'}")
-        lines.append(f"💬 Мотивация: {app_data.get('motivation') or '—'}")
+        lines.append(f"\n📋 Опыт: {_html_escape(app_data.get('experience') or '—')}")
+        lines.append(f"💬 Мотивация: {_html_escape(app_data.get('motivation') or '—')}")
 
     lines.append(f"\n📅 Подано: {date_str}")
     text = "\n".join(lines)
@@ -323,7 +333,7 @@ def receive_application():
         await tg_app.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=keyboard,
         )
 
