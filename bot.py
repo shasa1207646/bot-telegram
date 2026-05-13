@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timedelta
 from threading import Thread
 
+import psycopg2
+import psycopg2.extras
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
@@ -24,6 +26,7 @@ RAILWAY_URL       = os.environ.get("RAILWAY_CALLBACK_URL", "")
 RAILWAY_AUTH_URL  = os.environ.get("RAILWAY_AUTH_URL", "")
 SECRET            = os.environ.get("INTERNAL_SECRET", "")
 PORT              = int(os.environ.get("PORT", 3000))
+DATABASE_URL      = os.environ.get("DATABASE_URL", "")
 
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN не задан!")
@@ -34,12 +37,13 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── In-memory сессии модераторов ────────────────────────────────────────────
+# ─── In-memory кэш сессий модераторов ────────────────────────────────────────
 # { telegram_user_id: { discord_username, discord_user_id, is_moderator, expires_at } }
 mod_sessions: dict[int, dict] = {}
 
 
 def get_session(user_id: int) -> dict | None:
+    """Проверить сессию только в памяти (устаревший вариант, оставлен для совместимости)."""
     s = mod_sessions.get(user_id)
     if not s:
         return None
@@ -47,6 +51,100 @@ def get_session(user_id: int) -> dict | None:
         mod_sessions.pop(user_id, None)
         return None
     return s
+
+
+def get_session_db(user_id: int) -> dict | None:
+    """Вернуть сессию модератора: сначала из кэша, затем из PostgreSQL.
+
+    Условие валидности: is_moderator = TRUE AND expires_at > NOW().
+    Возвращает словарь с данными сессии или None.
+    """
+    # 1. Проверить in-memory кэш
+    cached = mod_sessions.get(user_id)
+    if cached and datetime.now() <= cached["expires_at"]:
+        return cached
+
+    # Кэш устарел или отсутствует — убрать протухшую запись
+    mod_sessions.pop(user_id, None)
+
+    # 2. Запросить из БД
+    if not DATABASE_URL:
+        return None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT discord_username, discord_user_id, is_moderator, expires_at
+                    FROM moderator_sessions
+                    WHERE telegram_user_id = %s
+                      AND is_moderator = TRUE
+                      AND expires_at > NOW()
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.error("get_session_db: ошибка запроса к БД: %s", e)
+        return None
+
+    if not row:
+        return None
+
+    session = {
+        "discord_username": row["discord_username"],
+        "discord_user_id":  row["discord_user_id"],
+        "is_moderator":     row["is_moderator"],
+        "expires_at":       row["expires_at"],
+    }
+    # Обновить кэш
+    mod_sessions[user_id] = session
+    return session
+
+
+def upsert_session_db(
+    user_id: int,
+    discord_username: str,
+    discord_user_id: str,
+    is_moderator: bool,
+    expires_at: datetime,
+) -> None:
+    """Сохранить или обновить сессию в PostgreSQL, затем обновить in-memory кэш."""
+    if DATABASE_URL:
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO moderator_sessions
+                            (telegram_user_id, discord_username, discord_user_id, is_moderator, expires_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (telegram_user_id) DO UPDATE SET
+                            discord_username = EXCLUDED.discord_username,
+                            discord_user_id  = EXCLUDED.discord_user_id,
+                            is_moderator     = EXCLUDED.is_moderator,
+                            expires_at       = EXCLUDED.expires_at
+                        """,
+                        (user_id, discord_username, discord_user_id, is_moderator, expires_at),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            log.info("upsert_session_db: сессия пользователя %s сохранена в БД", user_id)
+        except Exception as e:
+            log.error("upsert_session_db: ошибка записи в БД: %s", e)
+
+    # Обновить in-memory кэш независимо от результата записи в БД
+    mod_sessions[user_id] = {
+        "discord_username": discord_username,
+        "discord_user_id":  discord_user_id,
+        "is_moderator":     is_moderator,
+        "expires_at":       expires_at,
+    }
 
 
 # ─── Команды бота ─────────────────────────────────────────────────────────────
@@ -77,7 +175,7 @@ async def cmd_auth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    session = get_session(user_id)
+    session = get_session_db(user_id)
     if not session:
         await update.message.reply_text(
             "❌ Вы не авторизованы. Используйте /auth для входа через Discord."
@@ -119,7 +217,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action, app_id = data.split("_", 1)
 
     # Проверить сессию
-    session = get_session(user_id)
+    session = get_session_db(user_id)
     if not session:
         await query.answer("⚠️ Сначала авторизуйтесь: /auth", show_alert=True)
         return
@@ -249,22 +347,21 @@ def receive_session():
     if not tg_id:
         return jsonify({"error": "Нет telegram_user_id"}), 400
 
-    mod_sessions[int(tg_id)] = {
-        "discord_username": data.get("discord_username", ""),
-        "discord_user_id":  data.get("discord_user_id", ""),
-        "is_moderator":     bool(data.get("is_moderator")),
-        "expires_at":       datetime.now() + timedelta(days=7),
-    }
-
+    user_id      = int(tg_id)
     discord_name = data.get("discord_username", "")
+    discord_uid  = data.get("discord_user_id", "")
     is_mod       = bool(data.get("is_moderator"))
+    expires_at   = datetime.now() + timedelta(days=7)
+
+    # Сохранить в PostgreSQL и обновить in-memory кэш
+    upsert_session_db(user_id, discord_name, discord_uid, is_mod, expires_at)
     msg = (
         f"✅ Авторизация успешна! Вы вошли как {discord_name}.\n"
         f"{'🛡️ Статус модератора подтверждён.' if is_mod else '⚠️ Роль модератора не обнаружена на сервере.'}"
     )
 
     async def _notify():
-        await tg_app.bot.send_message(chat_id=int(tg_id), text=msg)
+        await tg_app.bot.send_message(chat_id=user_id, text=msg)
 
     asyncio.run_coroutine_threadsafe(_notify(), tg_app.bot._loop if hasattr(tg_app.bot, "_loop") else asyncio.get_event_loop())
     return jsonify({"success": True})
