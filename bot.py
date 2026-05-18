@@ -413,9 +413,23 @@ async def main():
     log.info("Telegram бот запущен (polling)")
     async with tg_app:
         await tg_app.initialize()
-        # Удаляем webhook перед polling — иначе Telegram вернёт 409 Conflict
-        await tg_app.bot.delete_webhook(drop_pending_updates=True)
-        log.info("Webhook удалён, запускаем polling")
+
+        # Удаляем webhook и ждём пока старый экземпляр (если есть) умрёт.
+        # Railway поднимает новый контейнер до остановки старого —
+        # поэтому делаем несколько попыток с паузами.
+        for attempt in range(1, 11):
+            await tg_app.bot.delete_webhook(drop_pending_updates=True)
+            log.info("Webhook удалён (попытка %d/10), ждём 5 сек...", attempt)
+            await asyncio.sleep(5)
+            # Проверяем: нет ли активного webhook прямо сейчас
+            wh_info = await tg_app.bot.get_webhook_info()
+            if not wh_info.url:
+                log.info("Webhook не активен — можно запускать polling")
+                break
+            log.warning("Webhook всё ещё активен (%s), повторяем...", wh_info.url)
+        else:
+            log.error("Не удалось сбросить webhook за 10 попыток, запускаем polling всё равно")
+
         await tg_app.start()
         await tg_app.updater.start_polling(drop_pending_updates=True)
         # Держим бота живым
