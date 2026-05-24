@@ -1,8 +1,11 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { Client, GatewayIntentBits, Guild, GuildMember, VoiceChannel, StageChannel } from 'discord.js';
+import * as nodePath from 'path';
 // Прописываем ffmpeg в PATH чтобы @discordjs/voice его нашёл
 import ffmpegPath from 'ffmpeg-static';
-process.env.PATH = `${ffmpegPath ? require('path').dirname(ffmpegPath) : ''}:${process.env.PATH}`;
+if (ffmpegPath) {
+  process.env.PATH = `${nodePath.dirname(ffmpegPath)}:${process.env.PATH || ''}`;
+}
 import {
   joinVoiceChannel,
   createAudioPlayer,
@@ -115,7 +118,7 @@ async function playSound(
     await entersState(connection, VoiceConnectionStatus.Ready, 5000);
 
     const player = createAudioPlayer();
-    const soundPath = path.join(__dirname, '..', 'sounds', sound.file);
+    const soundPath = path.join(process.cwd(), 'sounds', sound.file);
     const resource = createAudioResource(soundPath);
 
     connection.subscribe(player);
