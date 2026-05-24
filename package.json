@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "description": "Telegram бот для управления голосовыми каналами Discord",
   "scripts": {
-    "start": "ts-node --transpileOnly --compiler-options {\"module\":\"commonjs\",\"moduleResolution\":\"node\",\"esModuleInterop\":true,\"skipLibCheck\":true} bot.ts",
-    "dev": "ts-node --transpileOnly --compiler-options {\"module\":\"commonjs\",\"moduleResolution\":\"node\",\"esModuleInterop\":true,\"skipLibCheck\":true} bot.ts"
+    "start": "ts-node --transpileOnly bot.ts",
+    "dev": "ts-node --transpileOnly bot.ts"
   },
   "dependencies": {
     "discord.js": "^14.14.0",
