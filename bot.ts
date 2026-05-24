@@ -8,7 +8,6 @@ const TG_TOKEN      = process.env.TG_BOT_TOKEN!;
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN!;
 const GUILD_ID      = process.env.DISCORD_GUILD_ID!;
 
-// Telegram user IDs разрешённых пользователей (whitelist)
 const ALLOWED_TG_IDS: number[] = (process.env.TG_ALLOWED_IDS || '')
   .split(',')
   .map(s => parseInt(s.trim()))
@@ -25,9 +24,13 @@ const discord = new Client({
 
 let guild: Guild | null = null;
 
-discord.once('ready', async () => {
+// Используем clientReady (новое название) + обратная совместимость
+(discord as any).on('clientReady', async () => {
   console.log(`✅ Discord бот запущен как ${discord.user?.tag}`);
-  guild = await discord.guilds.fetch(GUILD_ID);
+  guild = await discord.guilds.fetch(GUILD_ID) as Guild;
+  // Форс-загружаем каналы и участников
+  await guild.channels.fetch();
+  await guild.members.fetch();
   console.log(`✅ Сервер: ${guild.name}`);
 });
 
@@ -35,9 +38,6 @@ discord.login(DISCORD_TOKEN);
 
 // ─── TELEGRAM BOT ──────────────────────────────────────────────────────────
 const tg = new TelegramBot(TG_TOKEN, { polling: true });
-
-// Хранилище: chatId → выбранный участник (discord userId)
-const selectedMember: Record<number, string> = {};
 
 function isAllowed(userId: number): boolean {
   return ALLOWED_TG_IDS.includes(userId);
@@ -51,37 +51,48 @@ function checkAccess(msg: TelegramBot.Message): boolean {
   return true;
 }
 
-function escMd(text: string): string {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+// Безопасное экранирование для MarkdownV2
+function esc(text: string): string {
+  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+}
+
+async function getGuild(): Promise<Guild | null> {
+  if (guild) return guild;
+  // Если ещё не загрузился — ждём до 5 секунд
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    if (guild) return guild;
+  }
+  return null;
 }
 
 // ─── /start ────────────────────────────────────────────────────────────────
 tg.onText(/\/start/, async (msg) => {
   if (!checkAccess(msg)) return;
   tg.sendMessage(msg.chat.id,
-    `👋 *Petushara Voice Manager*\n\n` +
-    `Команды:\n` +
-    `/voice — список людей в войсе\n` +
-    `/kick @username — кикнуть из войса\n` +
-    `/mute @username — замутить микрофон\n` +
-    `/unmute @username — снять мут микрофона\n` +
-    `/deafen @username — выключить звук\n` +
-    `/undeafen @username — включить звук\n` +
-    `/all\\_mute — замутить всех в войсе\n` +
-    `/all\\_unmute — снять мут у всех\n`,
-    { parse_mode: 'MarkdownV2' }
+    '👋 Petushara Voice Manager\n\n' +
+    'Команды:\n' +
+    '/voice — список людей в войсе\n' +
+    '/kick @username — кикнуть из войса\n' +
+    '/mute @username — замутить микрофон\n' +
+    '/unmute @username — снять мут микрофона\n' +
+    '/deafen @username — выключить звук\n' +
+    '/undeafen @username — включить звук\n' +
+    '/all_mute — замутить всех в войсе\n' +
+    '/all_unmute — снять мут у всех'
   );
 });
 
-// ─── /voice — список участников в голосовых каналах ───────────────────────
+// ─── /voice — список участников ───────────────────────────────────────────
 tg.onText(/\/voice/, async (msg) => {
   if (!checkAccess(msg)) return;
-  if (!guild) return tg.sendMessage(msg.chat.id, '❌ Discord не подключён.');
+  const g = await getGuild();
+  if (!g) return tg.sendMessage(msg.chat.id, '❌ Discord ещё не подключён, подожди пару секунд и попробуй снова.');
 
-  await guild.members.fetch();
+  await g.members.fetch();
   const voiceMembers: { channel: string; member: GuildMember }[] = [];
 
-  guild.channels.cache.forEach(ch => {
+  g.channels.cache.forEach(ch => {
     if (ch.isVoiceBased()) {
       const vc = ch as any;
       vc.members?.forEach((m: GuildMember) => {
@@ -94,24 +105,21 @@ tg.onText(/\/voice/, async (msg) => {
     return tg.sendMessage(msg.chat.id, '🔇 Никого нет в войс-каналах.');
   }
 
+  // Без MarkdownV2 — просто plain text, безопаснее
   const lines = voiceMembers.map(({ channel, member }) => {
     const muted   = member.voice.serverMute ? '🔇' : '🎙';
     const deafend = member.voice.serverDeaf ? '🔕' : '🔊';
-    return `${muted}${deafend} \`${escMd(member.user.username)}\` — #${escMd(channel)}`;
+    return `${muted}${deafend} ${member.user.username} — ${channel}`;
   });
 
-  // Кнопки выбора участника
   const keyboard = voiceMembers.map(({ member }) => ([{
     text: member.user.username,
     callback_data: `select:${member.user.id}`,
   }]));
 
   await tg.sendMessage(msg.chat.id,
-    `🎧 *Участники в войсе:*\n\n${lines.join('\n')}\n\n_Нажми на участника для управления:_`,
-    {
-      parse_mode: 'MarkdownV2',
-      reply_markup: { inline_keyboard: keyboard },
-    }
+    `🎧 Участники в войсе:\n\n${lines.join('\n')}\n\nНажми на участника для управления:`,
+    { reply_markup: { inline_keyboard: keyboard } }
   );
 });
 
@@ -122,36 +130,36 @@ tg.on('callback_query', async (query) => {
     return tg.answerCallbackQuery(query.id, { text: '🚫 Нет доступа' });
   }
 
+  const g = await getGuild();
+  if (!g) {
+    tg.answerCallbackQuery(query.id, { text: '❌ Discord не подключён' });
+    return;
+  }
+
   if (query.data.startsWith('select:')) {
     const discordId = query.data.split(':')[1];
-    selectedMember[query.message.chat.id] = discordId;
-
-    if (!guild) return;
-    const member = await guild.members.fetch(discordId).catch(() => null);
+    const member = await g.members.fetch(discordId).catch(() => null);
     if (!member) return tg.answerCallbackQuery(query.id, { text: '❌ Участник не найден' });
 
-    const name = escMd(member.user.username);
+    const name   = member.user.username;
     const muted  = member.voice.serverMute ? '✅ замучен' : '❌ не замучен';
     const deafen = member.voice.serverDeaf ? '✅ оглушён' : '❌ не оглушён';
 
     await tg.editMessageText(
-      `👤 *${name}*\n\n🎙 Мут: ${muted}\n🔊 Деаф: ${deafen}\n\nВыбери действие:`,
+      `👤 ${name}\n\n🎙 Мут: ${muted}\n🔊 Деаф: ${deafen}\n\nВыбери действие:`,
       {
         chat_id: query.message.chat.id,
         message_id: query.message.message_id,
-        parse_mode: 'MarkdownV2',
         reply_markup: {
           inline_keyboard: [
+            [{ text: '👢 Кикнуть из войса', callback_data: `action:kick:${discordId}` }],
             [
-              { text: '👢 Кикнуть из войса', callback_data: `action:kick:${discordId}` },
+              { text: '🔇 Мут микрофона', callback_data: `action:mute:${discordId}` },
+              { text: '🎙 Снять мут',      callback_data: `action:unmute:${discordId}` },
             ],
             [
-              { text: '🔇 Мут микрофона',    callback_data: `action:mute:${discordId}` },
-              { text: '🎙 Снять мут',         callback_data: `action:unmute:${discordId}` },
-            ],
-            [
-              { text: '🔕 Выкл. звук',        callback_data: `action:deafen:${discordId}` },
-              { text: '🔊 Вкл. звук',          callback_data: `action:undeafen:${discordId}` },
+              { text: '🔕 Выкл. звук',    callback_data: `action:deafen:${discordId}` },
+              { text: '🔊 Вкл. звук',      callback_data: `action:undeafen:${discordId}` },
             ],
             [{ text: '◀️ Назад к списку', callback_data: 'back' }],
           ],
@@ -173,12 +181,13 @@ tg.on('callback_query', async (query) => {
   }
 });
 
-// ─── Команды через текст (/kick username и т.д.) ───────────────────────────
+// ─── Команды через текст ───────────────────────────────────────────────────
 async function findMemberByUsername(username: string): Promise<GuildMember | null> {
-  if (!guild) return null;
-  await guild.members.fetch();
+  const g = await getGuild();
+  if (!g) return null;
+  await g.members.fetch();
   const clean = username.replace('@', '').toLowerCase();
-  return guild.members.cache.find(m =>
+  return g.members.cache.find(m =>
     m.user.username.toLowerCase() === clean ||
     m.displayName.toLowerCase() === clean
   ) || null;
@@ -190,17 +199,18 @@ tg.onText(/\/(kick|mute|unmute|deafen|undeafen) (.+)/, async (msg, match) => {
   const action   = match[1];
   const username = match[2].trim();
   const member   = await findMemberByUsername(username);
-  if (!member) return tg.sendMessage(msg.chat.id, `❌ Пользователь \`${username}\` не найден на сервере.`, { parse_mode: 'Markdown' });
+  if (!member) return tg.sendMessage(msg.chat.id, `❌ Пользователь ${username} не найден на сервере.`);
   await handleVoiceAction(msg.chat.id, action, member.user.id);
 });
 
 // ─── /all_mute и /all_unmute ───────────────────────────────────────────────
 tg.onText(/\/all_mute/, async (msg) => {
   if (!checkAccess(msg)) return;
-  if (!guild) return tg.sendMessage(msg.chat.id, '❌ Discord не подключён.');
-  await guild.members.fetch();
+  const g = await getGuild();
+  if (!g) return tg.sendMessage(msg.chat.id, '❌ Discord не подключён.');
+  await g.members.fetch();
   let count = 0;
-  for (const [, member] of guild.members.cache) {
+  for (const [, member] of g.members.cache) {
     if (member.voice.channel && !member.user.bot) {
       await member.voice.setMute(true, 'Mass mute via Telegram').catch(() => {});
       count++;
@@ -211,10 +221,11 @@ tg.onText(/\/all_mute/, async (msg) => {
 
 tg.onText(/\/all_unmute/, async (msg) => {
   if (!checkAccess(msg)) return;
-  if (!guild) return tg.sendMessage(msg.chat.id, '❌ Discord не подключён.');
-  await guild.members.fetch();
+  const g = await getGuild();
+  if (!g) return tg.sendMessage(msg.chat.id, '❌ Discord не подключён.');
+  await g.members.fetch();
   let count = 0;
-  for (const [, member] of guild.members.cache) {
+  for (const [, member] of g.members.cache) {
     if (member.voice.channel && !member.user.bot) {
       await member.voice.setMute(false, 'Mass unmute via Telegram').catch(() => {});
       count++;
@@ -230,9 +241,10 @@ async function handleVoiceAction(
   discordId: string,
   callbackQueryId?: string,
 ) {
-  if (!guild) return tg.sendMessage(chatId, '❌ Discord не подключён.');
+  const g = await getGuild();
+  if (!g) return tg.sendMessage(chatId, '❌ Discord не подключён.');
 
-  const member = await guild.members.fetch(discordId).catch(() => null);
+  const member = await g.members.fetch(discordId).catch(() => null);
   if (!member) {
     tg.sendMessage(chatId, '❌ Участник не найден.');
     if (callbackQueryId) tg.answerCallbackQuery(callbackQueryId, { text: '❌ Не найден' });
@@ -249,33 +261,27 @@ async function handleVoiceAction(
           break;
         }
         await member.voice.disconnect('Kicked via Telegram');
-        tg.sendMessage(chatId, `👢 *${name}* кикнут из войса.`, { parse_mode: 'Markdown' });
+        tg.sendMessage(chatId, `👢 ${name} кикнут из войса.`);
         break;
-
       case 'mute':
         await member.voice.setMute(true, 'Muted via Telegram');
-        tg.sendMessage(chatId, `🔇 Микрофон *${name}* заглушён.`, { parse_mode: 'Markdown' });
+        tg.sendMessage(chatId, `🔇 Микрофон ${name} заглушён.`);
         break;
-
       case 'unmute':
         await member.voice.setMute(false, 'Unmuted via Telegram');
-        tg.sendMessage(chatId, `🎙 Мут с *${name}* снят.`, { parse_mode: 'Markdown' });
+        tg.sendMessage(chatId, `🎙 Мут с ${name} снят.`);
         break;
-
       case 'deafen':
         await member.voice.setDeaf(true, 'Deafened via Telegram');
-        tg.sendMessage(chatId, `🔕 Звук *${name}* выключен.`, { parse_mode: 'Markdown' });
+        tg.sendMessage(chatId, `🔕 Звук ${name} выключен.`);
         break;
-
       case 'undeafen':
         await member.voice.setDeaf(false, 'Undeafened via Telegram');
-        tg.sendMessage(chatId, `🔊 Звук *${name}* включён.`, { parse_mode: 'Markdown' });
+        tg.sendMessage(chatId, `🔊 Звук ${name} включён.`);
         break;
-
       default:
         tg.sendMessage(chatId, '❌ Неизвестное действие.');
     }
-
     if (callbackQueryId) tg.answerCallbackQuery(callbackQueryId, { text: '✅ Готово' });
   } catch (err: any) {
     console.error(err);
