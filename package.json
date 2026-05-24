@@ -1,0 +1,25 @@
+{
+  "name": "tg-voice-manager",
+  "version": "1.0.0",
+  "description": "Telegram бот для управления голосовыми каналами Discord",
+  "scripts": {
+    "build": "npx esbuild bot.ts --bundle --platform=node --outfile=dist/bot.js --external:bufferutil --external:utf-8-validate --external:@discordjs/opus --external:sodium-native --external:libsodium-wrappers",
+    "start": "node dist/bot.js",
+    "dev": "ts-node bot.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.0",
+    "@discordjs/voice": "^0.17.0",
+    "@discordjs/opus": "^0.9.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "dotenv": "^16.3.0",
+    "ffmpeg-static": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/node-telegram-bot-api": "^0.64.0",
+    "typescript": "^5.3.0",
+    "ts-node": "^10.9.0",
+    "esbuild": "^0.20.0"
+  }
+}
