@@ -119,7 +119,61 @@ async function fetchMembersIfNeeded(g: Guild) {
 discord.login(DISCORD_TOKEN);
 
 // ─── TELEGRAM BOT ─────────────────────────────────────────────────────────────
-const tg = new TelegramBot(TG_TOKEN, { polling: true });
+const tg = new TelegramBot(TG_TOKEN, {
+  polling: {
+    interval: 300,
+    autoStart: true,
+    params: {
+      timeout: 30,
+    },
+  },
+  request: {
+    url: 'https://api.telegram.org',
+    agentOptions: {
+      keepAlive: true,
+    },
+    timeout: 30000,
+  } as any,
+});
+
+// ─── POLLING ERROR HANDLING WITH EXPONENTIAL BACKOFF ─────────────────────────
+let pollingBackoff = 5000; // start at 5 seconds
+const MAX_BACKOFF   = 60000; // cap at 60 seconds
+
+tg.on('polling_error', (err: Error) => {
+  console.error(`[TG] Polling error: ${err.message}`);
+  tg.stopPolling()
+    .catch(() => {})
+    .finally(() => {
+      console.log(`[TG] Reconnecting in ${pollingBackoff / 1000}s...`);
+      setTimeout(() => {
+        tg.startPolling({ restart: true })
+          .then(() => {
+            console.log('[TG] Polling restarted successfully.');
+            pollingBackoff = 5000; // reset on success
+          })
+          .catch((startErr: Error) => {
+            console.error(`[TG] Failed to restart polling: ${startErr.message}`);
+            pollingBackoff = Math.min(pollingBackoff * 2, MAX_BACKOFF);
+          });
+      }, pollingBackoff);
+      pollingBackoff = Math.min(pollingBackoff * 2, MAX_BACKOFF);
+    });
+});
+
+// ─── GRACEFUL SHUTDOWN ────────────────────────────────────────────────────────
+function shutdown(signal: string) {
+  console.log(`[TG] Received ${signal}, shutting down gracefully...`);
+  tg.stopPolling()
+    .then(() => {
+      console.log('[TG] Polling stopped. Exiting.');
+      process.exit(0);
+    })
+    .catch(() => process.exit(0));
+}
+
+process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 function isAllowed(userId: number): boolean {
   return ALLOWED_TG_IDS.includes(userId);
